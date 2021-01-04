@@ -1,59 +1,15 @@
-#include <Arduino.h>
-#include <U8g2lib.h>
-#include <SPI.h>
-#include "Adafruit_MAX31855.h"
+#include <ReflowOvenFirmware.h>
 
-struct DataPoint{
-  double temp;
-  int elapsedTime;
-};
-
-struct physicalCoordinates{
-  int x;
-  int y;
-};
-
-
-// Example creating a thermocouple instance with software SPI on any three
-// digital IO pins.
-#define MAXDO   PB14
-#define MAXCS   PB12
-#define MAXCLK  PB13
-#define SSR     PA8
-#define GRAPH_HEIGHT 50
-#define GRAPH_WIDTH  64
 
 // initialize the Thermocouple
 Adafruit_MAX31855 thermocouple(MAXCLK, MAXCS, MAXDO);
 U8G2_SSD1309_128X64_NONAME0_F_4W_HW_SPI u8g2(U8G2_R3, /* cs=*/ PA4, /* dc=*/ PB6, /* reset=*/ PB7); 
 
-bool   SSR_State;
-int    reflowState;
-int    runState;
-double tempC;
-double oldTempC;
-double tempMargin;
-double targetTemp;
-double preheatTemp;
-double reflowTemp;
-double maxTemp;
+#define KP 90.0 //90
+#define KI 6.0 //6
+#define KD 20.0 //20
 
-int preheatTime;
-int reflowTime;
-int coolTime;
-int stageStartTime;
-int stageTime;
-
-double ambientTemp;
-long startingTime;
-long preheatStartTime;
-double preheatSlope;
-
-double preheatEndTemp;
-long preheatEndTime;
-long reflowStartTime;
-double reflowSlope;
-
+AutoPID ovenPID(&tempC, &targetTemp, &outputPWM, 0, 4095, KP, KI, KD);
 
 struct physicalCoordinates tempNTime2Coordinates(int temp, int inputTime){
   struct physicalCoordinates coordinates;
@@ -112,9 +68,10 @@ void drawDisplay(){
   u8g2.print(targetTemp);
 
   u8g2.setCursor(0,88);
-  u8g2.print("SSR: ");
-  if(SSR_State) u8g2.print("On");
-  else u8g2.print("Off");
+  u8g2.print("SSR:");
+  u8g2.print((outputPWM/4095)*100);
+  // if(SSR_State) u8g2.print("On");
+  // else u8g2.print("Off");
 
   u8g2.setCursor(0,100);
   u8g2.print("Time:");
@@ -140,16 +97,21 @@ void drawDisplay(){
   u8g2.sendBuffer();          // transfer internal memory to the display
 }
 
+void btnpress(){
+  btnPressed = true;
+}
+
 void setup() {
   Serial.begin(9600);
-  Serial.println("Starting!");
+  // Serial.println("Starting!");
   // put your setup code here, to run once:
   tempC = 0.00;
   oldTempC = 0.00;
   reflowState = 0;
   runState = 1;
-  tempMargin = 5.00;
+  tempMargin = 10.00;
   targetTemp = 0.00;
+  outputPWM = 0.00;
 
   preheatTemp = 150.00;
   preheatTime = 120;
@@ -160,11 +122,34 @@ void setup() {
 
   preheatSlope = 0;
   reflowSlope = 0;
+
+  btnPressed = false;
   
+  analogWriteResolution(12);
+  analogWriteFrequency(500);
+  ovenPID.setTimeStep(200);
+  ovenPID.setBangBang(tempMargin);
   pinMode(SSR, OUTPUT);
-  digitalWrite(SSR, LOW);
+
+  pinMode(PB11, OUTPUT);
+  pinMode(PB10, OUTPUT);
+  pinMode(PB1, OUTPUT);
+
+  analogWrite(SSR, (int) round(outputPWM));
   SSR_State = false;
   
+  pinMode(PB5, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PB5), btnpress, RISING);
+
+  pinMode(PB4, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PB4), btnpress, RISING);
+
+  pinMode(PB3, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PB3), btnpress, RISING);
+
+  pinMode(PA15, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PA15), btnpress, RISING);
+
   delay(500);
 //  Serial.println("Initializing MAX31855 TC sensor...");
   thermocouple.begin();
@@ -183,10 +168,24 @@ void loop() {
   if(isnan(tempC)) tempC = oldTempC;
   else oldTempC = tempC;
 
+
+
 //  Serial.print("Temp: ");
-  Serial.println(tempC);
+  // Serial.println(tempC);
 //  Serial.println("C");
   
+  if(btnPressed){
+    Serial.println("Button Pressed!");
+    digitalWrite(PB11, HIGH);
+    digitalWrite(PB10, HIGH);
+    digitalWrite(PB1, HIGH);
+    btnPressed = false;
+  }else{
+    digitalWrite(PB11, LOW);
+    digitalWrite(PB10, LOW);
+    digitalWrite(PB1, LOW);
+  }
+
   if(runState == 1){
     if(reflowState == 0){
       targetTemp = preheatTemp;
@@ -203,15 +202,15 @@ void loop() {
         stageStartTime = (int) millis()/1000;
         stageTime = 0;
         preheatStartTime = millis();
-        Serial.println("");
-        Serial.println(ambientTemp);
-        Serial.println(preheatStartTime);
-        Serial.println(startingTime);
+        // Serial.println("");
+        // Serial.println(ambientTemp);
+        // Serial.println(preheatStartTime);
+        // Serial.println(startingTime);
         double timeDiff = (double) (preheatStartTime-startingTime);
         preheatSlope = (tempC-ambientTemp)/timeDiff;
-        Serial.print("Preheat Slope(delta T / delta ms):");
-        Serial.println(preheatSlope);
-        Serial.println("");
+        // Serial.print("Preheat Slope(delta T / delta ms):");
+        // Serial.println(preheatSlope);
+        // Serial.println("");
       }
     
     // Preheat
@@ -234,8 +233,8 @@ void loop() {
         reflowStartTime = millis();
         double timeDiff = (double) (preheatEndTime-reflowStartTime);
         reflowSlope = (tempC - preheatEndTemp)/(timeDiff);
-        Serial.print("Reflow Slope(delta T / delta ms):");
-        Serial.println(reflowSlope);
+        // Serial.print("Reflow Slope(delta T / delta ms):");
+        // Serial.println(reflowSlope);
       }
 
     // Relfowing
@@ -258,14 +257,30 @@ void loop() {
     stageTime = 0;
   }
 
-  
-  if(tempC < targetTemp - tempMargin){
-    digitalWrite(SSR, HIGH);
-    SSR_State = true;
-  }else if(tempC > targetTemp + tempMargin || tempC > maxTemp){
-    digitalWrite(SSR, LOW);
-    SSR_State = false;
-  }
+  ovenPID.run();
+  analogWrite(SSR, (int) round(outputPWM));
+  Serial.print(runState);
+  Serial.print(",");
+  Serial.print(tempC);
+  Serial.print(",");
+  Serial.print(targetTemp);
+  Serial.print(",");
+  Serial.print(outputPWM);
+  Serial.println("");
+
+  // if(round(outputPWM) < 5){
+  //   SSR_State = false;
+  // }else{
+  //   SSR_State = true;
+  // }
+
+  // if(tempC < targetTemp - tempMargin){
+  //   analogWrite(SSR, HIGH);
+  //   SSR_State = true;
+  // }else if(tempC > targetTemp + tempMargin || tempC > maxTemp){
+  //   digitalWrite(SSR, LOW);
+  //   SSR_State = false;
+  // }
 
 //  u8g2.setPowerSave(0);
   drawDisplay();
